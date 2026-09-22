@@ -4,6 +4,7 @@ pub mod estimator;
 pub mod eval;
 pub mod external;
 pub mod math;
+pub mod pipeline;
 pub mod random;
 pub mod scenario;
 pub mod sensor;
