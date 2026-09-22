@@ -69,6 +69,17 @@ impl GpsDiagnostics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorFreshness {
+    /// Ages at the last arrival in the complete ego input stream, not wall time.
+    /// None means this sensor never delivered a packet.
+    pub final_receipt_age_ns: Option<i64>,
+    pub final_measurement_age_ns: Option<i64>,
+    /// Longest interval between deliveries, including trailing silence.
+    /// Time before the first packet is excluded because its start is unknown.
+    pub maximum_receipt_gap_ns: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingDiagnostics {
     pub timing_compensation: bool,
     pub history_duration_ns: i64,
@@ -78,6 +89,9 @@ pub struct TimingDiagnostics {
     pub discarded_measurements: usize,
     pub revised_estimates: usize,
     pub maximum_delivery_age_ns: i64,
+    pub freshness_observed_at_ns: Option<i64>,
+    pub gps_freshness: SensorFreshness,
+    pub imu_freshness: SensorFreshness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +301,51 @@ fn timing(
             })
             .max()
             .unwrap_or(0),
+        freshness_observed_at_ns: measurements
+            .last()
+            .map(|value| value.time().arrival_time_ns),
+        gps_freshness: sensor_freshness(measurements, |value| {
+            matches!(value, EgoMeasurement::Gps(_))
+        }),
+        imu_freshness: sensor_freshness(measurements, |value| {
+            matches!(value, EgoMeasurement::Imu(_))
+        }),
+    }
+}
+
+// Inspect original deliveries, never reordered/replayed filter updates. A rejected
+// or history-discarded GPS fix still represents a packet received from the sensor.
+fn sensor_freshness(
+    measurements: &[EgoMeasurement],
+    is_sensor: impl Fn(&EgoMeasurement) -> bool,
+) -> SensorFreshness {
+    let mut last_arrival: Option<i64> = None;
+    let mut latest_measurement: Option<i64> = None;
+    let mut maximum_gap = 0;
+    for measurement in measurements.iter().filter(|value| is_sensor(value)) {
+        let time = measurement.time();
+        if let Some(previous) = last_arrival {
+            maximum_gap = maximum_gap.max(time.arrival_time_ns.saturating_sub(previous));
+        }
+        last_arrival = Some(time.arrival_time_ns);
+        latest_measurement = Some(
+            latest_measurement.map_or(time.measurement_time_ns, |previous| {
+                previous.max(time.measurement_time_ns)
+            }),
+        );
+    }
+    let observed_at = measurements
+        .last()
+        .map(|value| value.time().arrival_time_ns);
+    let receipt_age = observed_at
+        .zip(last_arrival)
+        .map(|(now, last)| now.saturating_sub(last));
+    SensorFreshness {
+        final_receipt_age_ns: receipt_age,
+        final_measurement_age_ns: observed_at
+            .zip(latest_measurement)
+            .map(|(now, latest)| now.saturating_sub(latest)),
+        maximum_receipt_gap_ns: receipt_age.map(|age| maximum_gap.max(age)),
     }
 }
 
@@ -301,6 +360,10 @@ fn validate_delivery_order(measurements: &[EgoMeasurement]) -> Result<()> {
     let mut previous = None;
     for measurement in measurements {
         let delivery = measurement.time().arrival_time_ns;
+        ensure!(
+            delivery >= measurement.time().measurement_time_ns,
+            "ego measurement arrives before its measurement time"
+        );
         if let Some(previous) = previous {
             ensure!(
                 delivery >= previous,
@@ -524,6 +587,110 @@ fn estimator_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timed_measurement(gps: bool, stamp: i64, arrival: i64) -> EgoMeasurement {
+        let time = Some(MeasurementTime {
+            measurement_time_ns: stamp,
+            arrival_time_ns: arrival,
+        });
+        if gps {
+            EgoMeasurement::Gps(GpsFix {
+                time,
+                ..Default::default()
+            })
+        } else {
+            EgoMeasurement::Imu(ImuSample {
+                time,
+                ..Default::default()
+            })
+        }
+    }
+
+    // Existing estimator tests check filter math and replay, not the distinction
+    // between packet receipt, measurement freshness, and trailing sensor silence.
+    #[test]
+    fn freshness_preserves_newest_stamp_and_counts_trailing_silence() {
+        let measurements = [
+            timed_measurement(true, 0, 0),
+            timed_measurement(true, 8, 10),
+            timed_measurement(true, 4, 11), // late old packet must not replace stamp 8
+            timed_measurement(false, 25, 25),
+        ];
+        let diagnostic = timing(&EgoEstimatorConfig::default(), &measurements, 0, 0, 0, 0);
+        assert_eq!(diagnostic.freshness_observed_at_ns, Some(25));
+        assert_eq!(diagnostic.gps_freshness.final_receipt_age_ns, Some(14));
+        assert_eq!(diagnostic.gps_freshness.final_measurement_age_ns, Some(17));
+        assert_eq!(diagnostic.gps_freshness.maximum_receipt_gap_ns, Some(14));
+        assert_eq!(diagnostic.imu_freshness.final_measurement_age_ns, Some(0));
+    }
+
+    #[test]
+    fn freshness_distinguishes_recovery_from_never_received() {
+        let measurements = [
+            timed_measurement(true, 4_500_000_000, 4_500_000_000),
+            timed_measurement(true, 10_000_000_000, 10_250_000_000),
+        ];
+        let diagnostic = timing(&EgoEstimatorConfig::default(), &measurements, 0, 0, 0, 0);
+        assert_eq!(diagnostic.gps_freshness.final_receipt_age_ns, Some(0));
+        assert_eq!(
+            diagnostic.gps_freshness.final_measurement_age_ns,
+            Some(250_000_000)
+        );
+        assert_eq!(
+            diagnostic.gps_freshness.maximum_receipt_gap_ns,
+            Some(5_750_000_000)
+        );
+        assert_eq!(diagnostic.imu_freshness.final_receipt_age_ns, None);
+        assert_eq!(diagnostic.imu_freshness.final_measurement_age_ns, None);
+        assert_eq!(diagnostic.imu_freshness.maximum_receipt_gap_ns, None);
+        let empty = timing(&EgoEstimatorConfig::default(), &[], 0, 0, 0, 0);
+        assert_eq!(empty.freshness_observed_at_ns, None);
+        assert_eq!(empty.gps_freshness.final_receipt_age_ns, None);
+    }
+
+    #[test]
+    fn measurement_cannot_arrive_before_it_was_taken() {
+        assert!(validate_delivery_order(&[timed_measurement(true, 2, 1)]).is_err());
+    }
+
+    #[test]
+    fn rejected_and_history_discarded_gps_still_count_as_received() -> Result<()> {
+        let mut gps = timed_measurement(true, 4, 11);
+        if let EgoMeasurement::Gps(fix) = &mut gps {
+            fix.position_world_m = Some(fusion_schema::messages::Vec2 { x: 1e6, y: 1e6 });
+            fix.horizontal_position_variance_m2 = 1.0;
+        }
+        let measurements = [
+            timed_measurement(false, 1, 1),
+            timed_measurement(false, 10, 10),
+            gps,
+        ];
+        for algorithm in [EgoEstimatorAlgorithm::Basic, EgoEstimatorAlgorithm::ImuBias] {
+            for timing_compensation in [false, true] {
+                let config = EgoEstimatorConfig {
+                    algorithm,
+                    timing_compensation,
+                    history_duration_ns: 1,
+                    gps_gate_sigma: 3.0,
+                    ..Default::default()
+                };
+                let result = run(&config, &ImuConfig::default(), &measurements)?;
+                assert_eq!(result.timing.gps_freshness.final_receipt_age_ns, Some(0));
+                assert_eq!(
+                    result.timing.gps_freshness.final_measurement_age_ns,
+                    Some(7)
+                );
+                assert_eq!(result.timing.imu_freshness.final_receipt_age_ns, Some(1));
+                if timing_compensation {
+                    assert_eq!(result.timing.discarded_measurements, 1);
+                    assert_eq!(result.gps_diagnostics.attempted_fixes, 0);
+                } else {
+                    assert_eq!(result.gps_diagnostics.rejected_fixes, 1);
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[cfg(feature = "gtsam")]
     use fusion_schema::messages::Vec2;

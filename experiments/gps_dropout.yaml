@@ -1,0 +1,64 @@
+# GPS dropout and recovery experiment
+#
+# Question: How do vehicle and object errors change while GPS is unavailable?
+# GPS is absent during [5, 10) seconds, then returns before the run ends at 16 s.
+# Inspect the turn, recovery at 10 s, and the sensor freshness report.
+
+root_seed: 20260823
+
+world:
+  objects:
+    - id: stationary
+      initial_position_m: { x: 8.0, y: 4.0 }
+      velocity_world_mps: { x: 0.0, y: 0.0 }
+    - id: moving
+      initial_position_m: { x: 5.0, y: -3.0 }
+      velocity_world_mps: { x: 0.15, y: 0.35 }
+
+trajectory:
+  - { id: rest, duration_s: 1.0, longitudinal_acceleration_mps2: 0.0, yaw_rate_radps: 0.0 }
+  - { id: accelerate, duration_s: 2.0, longitudinal_acceleration_mps2: 0.5, yaw_rate_radps: 0.0 }
+  - { id: straight, duration_s: 2.0, longitudinal_acceleration_mps2: 0.0, yaw_rate_radps: 0.0 }
+  - { id: left-turn, duration_s: 2.0, longitudinal_acceleration_mps2: 0.0, yaw_rate_radps: 0.5 }
+  - { id: cruise, duration_s: 4.0, longitudinal_acceleration_mps2: 0.0, yaw_rate_radps: 0.0 }
+  - { id: right-turn, duration_s: 2.0, longitudinal_acceleration_mps2: 0.0, yaw_rate_radps: -0.5 }
+  - { id: brake, duration_s: 2.0, longitudinal_acceleration_mps2: -0.5, yaw_rate_radps: 0.0 }
+  - { id: final-rest, duration_s: 1.0, longitudinal_acceleration_mps2: 0.0, yaw_rate_radps: 0.0 }
+
+imu:
+  gyro_bias_radps: 0.003
+  accel_bias_mps2: 0.025
+  gyro_bias_random_walk_radps_sqrt_s: 0.00002
+  accel_bias_random_walk_mps2_sqrt_s: 0.0005
+  enabled: true
+  rate_hz: 100.0
+  gyro_white_noise_density_radps_sqrt_hz: 0.0008
+  accel_white_noise_density_mps2_sqrt_hz: 0.012
+
+gps:
+  dropout_start_s: 5.0
+  dropout_end_s: 10.0
+  enabled: true
+  rate_hz: 2.0
+  horizontal_position_stddev_m: 0.25
+
+camera:
+  # Try disabling either camera or lidar.
+  # Camera gives direction; lidar also gives distance.
+  enabled: true
+  rate_hz: 10.0
+  horizontal_fov_rad: 2.8
+  max_range_m: 25.0
+  bearing_noise_stddev_rad: 0.006
+  detection_probability: 1.0
+
+lidar:
+  enabled: true
+  rate_hz: 5.0
+  horizontal_fov_rad: 6.283185307179586
+  max_range_m: 25.0
+  range_noise_stddev_m: 0.025
+  bearing_noise_stddev_rad: 0.002
+  detection_probability: 1.0
+ego_estimator:
+  algorithm: imu_bias

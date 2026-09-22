@@ -20,6 +20,13 @@ pub(super) fn generate(
         scenario.effective_duration_s(),
         config.rate_hz,
         |time_ns, sequence| {
+            let time_s = time_ns as f64 / 1e9;
+            if let (Some(start), Some(end)) = (config.dropout_start_s, config.dropout_end_s)
+                && time_s >= start
+                && time_s < end
+            {
+                return;
+            }
             let platform = trajectory.sample_ns(time_ns);
             let outlier_scale =
                 if random.uniform("gps", sequence, "outlier", 0) < config.outlier_probability {

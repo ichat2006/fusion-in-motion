@@ -342,6 +342,23 @@ pub fn write_reports(
             ego_timing.maximum_delivery_age_ns as f64 / 1_000_000.0,
         ));
     }
+    summary.push_str("\n## Sensor freshness\n\nAges at the last GPS/IMU arrival; received packets, regardless of filter acceptance.\n\nSensor | Receipt age | Measurement age | Maximum receipt gap\n--- | --- | --- | ---\n");
+    for (name, freshness) in [
+        ("GPS", &ego_timing.gps_freshness),
+        ("IMU", &ego_timing.imu_freshness),
+    ] {
+        let display_age = |age: Option<i64>| {
+            age.map(|value| format!("{:.3} s", value as f64 / 1e9))
+                .unwrap_or_else(|| "unavailable".to_owned())
+        };
+        summary.push_str(&format!(
+            "{name} | {} | {} | {}\n",
+            display_age(freshness.final_receipt_age_ns),
+            display_age(freshness.final_measurement_age_ns),
+            display_age(freshness.maximum_receipt_gap_ns),
+        ));
+    }
+    summary.push_str("\nMaximum receipt gap includes trailing silence after the first packet. Unavailable means no packet was received.\n");
     fs::write(report_dir.join("summary.md"), summary)?;
     Ok(())
 }

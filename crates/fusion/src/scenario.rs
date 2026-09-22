@@ -117,6 +117,8 @@ pub struct GpsConfig {
     pub horizontal_position_stddev_m: f64,
     pub outlier_probability: f64,
     pub outlier_stddev_m: f64,
+    pub dropout_start_s: Option<f64>,
+    pub dropout_end_s: Option<f64>,
 }
 
 impl Default for GpsConfig {
@@ -128,6 +130,8 @@ impl Default for GpsConfig {
             horizontal_position_stddev_m: 0.25,
             outlier_probability: 0.0,
             outlier_stddev_m: 10.0,
+            dropout_start_s: None,
+            dropout_end_s: None,
         }
     }
 }
